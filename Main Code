@@ -1,0 +1,867 @@
+#!/usr/bin/python2
+#chassisTest3- stepper pionts sensor pckage to desired travel  body moves in desired direction with accel/decel
+#lrscan = calculates coarse and fine scan steps but does not actually activate ultrasonic sensor
+#scan2.py = intigrates serial_com.py for actual ultrasonic ranges
+#chassisTest4= intigrates scan2.py and makes nested functions of coarse scan and fine scan
+    #and added stepper turn off and distance measure etc
+#ct4.py further refinements of scans and full multiplex of 3 lasers
+#ct5.py fixed sonic buffer mis-order and on motor step error to drifting.
+#ct6.py 7/22/17 put dates in further revisions. physical build is roughed in
+    #sensor reading to nav changes and doubling ultrasonic for accuracy
+
+
+from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
+
+import time
+import VL53L0X
+import atexit
+import math
+import RPi.GPIO as gpio
+import sys
+import serial
+
+ser = serial.Serial(port='/dev/ttyS0',baudrate = 9600,parity = serial.PARITY_NONE,stopbits=serial.STOPBITS_ONE,
+        bytesize=serial.EIGHTBITS,timeout=1)
+
+
+
+
+# Create a VL53L0X object for device on TCA9548A bus 1
+tof1 = VL53L0X.VL53L0X(TCA9548A_Num=1, TCA9548A_Addr=0x70)#RIGHT
+# Create a VL53L0X object for device on TCA9548A bus 2
+tof2 = VL53L0X.VL53L0X(TCA9548A_Num=2, TCA9548A_Addr=0x70)# LEFT
+# Create a VL53L0X object for device on TCA9548A bus 2
+tofcliff = VL53L0X.VL53L0X(TCA9548A_Num=3, TCA9548A_Addr=0x70)
+
+
+# Start ranging on TCA9548A bus 1
+tof1.start_ranging(VL53L0X.VL53L0X_LONG_RANGE_MODE)
+# Start ranging on TCA9548A bus 2
+tof2.start_ranging(VL53L0X.VL53L0X_LONG_RANGE_MODE)
+# Start Ranging on TCA9548A bus 3 (cliff sensor)
+tofcliff.start_ranging(VL53L0X.VL53L0X_BETTER_ACCURACY_MODE)
+#CHOICES include:
+#VL53L0X_GOOD_ACCURACY_MODE
+#VL53L0X_BETTER_ACCURACY_MODE
+#VL53L0X_BEST_ACCURACY_MODE
+#VL53L0X_LONG_RANGE_ACCURACY_MODE
+#VL53L0X_HIGH_SPEED_MODE
+
+#LIST OF DEFINITIONS      
+best_sonic_inches= round(float(0),2)#initial value for best ultrasonicdistance
+
+step_pos=int(0) #initial stepper position
+
+print("step_pos" + str(step_pos))
+
+steps_in_motor= int(200*5.18) #steps in motor*gearbox=1036
+print("\nsteps_in_motor" + str (steps_in_motor))
+
+coarse_scan_angle=int(10) # degree angle of coarse scan
+print("\ncoarse_scan_angle;" + str(coarse_scan_angle))
+
+coarse_scan_value= float(coarse_scan_angle*steps_in_motor/360.0)# carry decimal for accumulating errors
+print ("\ncoarse_scan_value" +str(coarse_scan_value))
+
+SqRt3o2 = math.sqrt(3/2) # do math here so it doesnt calc square every loop
+
+speed=int(50) #this affects for loop in acceleration.  need to check
+#accumulated_coarse_value=float(0)
+
+scan_var= int(254) #mm of +/- allowavle variation of 2 scans
+
+cliff_nominal=int(350) #floor height maybe in mm?
+#initial_step_goal=round(coarse_scan_value)
+
+#step_goal=round(coarse_scan_value)
+
+#scan_interval_count= int(0)#  scan interval start at 0
+
+
+fine_scan_steps= int(6) # ach 3 steps = 1.04 degrees
+print("\nFine Scan STEPS:" + str (fine_scan_steps))
+
+
+# create a default object, no changes to I2C address or frequency
+mh = Adafruit_MotorHAT(addr=0x60)
+
+
+def activate_lasers():
+    timing = tof1.get_timing()
+    if (timing < 20000):
+        timing = 20000
+    print ("Timing %d ms" % (timing/1000))
+    distance = tof1.get_distance()
+    if (distance > 0):
+        print ("1: %d mm, %d cm" % (distance, (distance/10)))
+
+    # Get distance from VL53L0X  on TCA9548A bus 2
+    distance = tof2.get_distance()
+    if (distance > 0):
+        print ("2: %d mm, %d cm" % (distance, (distance/10)))
+    # get distance from VL53L0X on TCA9548A bus 3 (Cliff sensor)
+    distance = tofcliff.get_distance()
+    if (distance > 0):
+        print ("cliff: %d mm, %d cm" % (distance, (distance/10)))
+
+def deactivate_lasers():
+    tof1.stop_ranging()
+    tof2.stop_ranging()
+    tof3.stop_ranging()
+    
+# 27:1 motot R G Y B  Normal motor B G R B
+#pin setup
+gpio.setmode(gpio.BCM)
+gpio.setwarnings(False)
+
+#GPIO for easyDriver stepper driver
+gpio.setup(23, gpio.OUT)# direction
+gpio.setup(24, gpio.OUT) #step
+gpio.setup(5,gpio.OUT) #MS1 blue wire
+gpio.setup(6, gpio.OUT) #MS2 purple wire
+gpio.setup(13, gpio.OUT) #sleep brown wire
+
+#stepper definitions
+def stepper_run():
+    gpio.output(24,0)
+    time.sleep(0.001)
+    gpio.output(24,1)
+    time.sleep(0.001)
+
+def set_cw():
+    gpio.output(23,0)
+    
+def set_ccw():
+    gpio.output(23,1)
+
+def ms_steps():
+    gpio.output(5,0)
+    gpio.output(6,0)
+    
+def stepper_sleep():
+    time.sleep(0.1)#keep stepper from drifting if coming off move
+    gpio.output(13,0)
+
+def stepper_wake():
+    gpio.output(13,1)
+
+def ultrasonic_scan():
+    #while True:
+    global best_sonic_inches
+    global angle
+    global best_step_goal
+    global sonic_inches
+    qc= (False) #quality control for 2 scans
+
+    while qc== (False):
+        #delay before first scan
+        time.sleep(0.100)
+        #first scan
+        x= ser.read(6) #read 6 bytes  sometimes it doesnt hit R
+        print("RAW ASCII VALUE")
+        ser.flushInput() #reset to collect more data
+        time.sleep(.001)
+        print (x, x[0], ord(x[0]))# "mm")
+                    
+        #THIS GETS INT FROM BYTE
+        if (x[0]=="R"):# is R the first of the numbers- encoded correctly
+            #print ("\nit works!\n")
+            x=x.strip(b'R\r') #strip the R and \r from value
+            x= x.decode("ascii").split(',') #turn it into a string?
+            print("X scan:" + str(x)) #now its a string
+            x= int(x[0]) #turn into an int() only value in y from tuple i think
+            
+            #time.sleep (1)
+        #break
+
+        else:
+            ser.flushInput()
+            print("\nRESET BUFFER!! RESET BUFFER!! RESET BUFFER!!\n")
+            if (x[1]=='R'):
+                print (x[2:])
+                x= (x[2:])#from 2 to end
+                print ("2nd string X:", x)
+                x= x.decode("ascii").split(',') #turn it into a string?
+                print(x) #now its a string
+                x= int(x[0]) #turn into an int() only value in y from tuple i think
+                #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+                #print ("Distance in inches:", sonic_inches)
+                    
+                    
+            elif (x[2]=='R'):
+                print (x[3:],x[0])
+                print (x[3:]+ x[0])
+                x= (x[3:]+x[0])
+                print ("3rd string X:", x)
+                x= x.decode("ascii").split(',') #turn it into a string?
+                print(x) #now its a string
+                x= int(x[0]) #turn into an int() only value in y from tuple i think
+                #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+                #print ("Distance in inches:", sonic_inches)
+                
+                
+            elif (x[3]=='R'):
+                print (x[4:],x[:2])
+                print (x[4:]+ x[:2])
+                x= (x[4:]+x[:2])
+                print ("4th string X:", x)
+                x= x.decode("ascii").split(',') #turn it into a string?
+                print(x) #now its a string
+                x= int(x[0]) #turn into an int() only value in y from tuple i think
+                #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+                #print ("Distance in inches:", sonic_inches)
+                
+
+            elif (x[4]=='R'):
+                print (x[5:],x[:3])
+                print (x[5:]+ x[:3])
+                x= (x[5:]+x[:3])
+                print ("5th string X:", x)
+                x= x.decode("ascii").split(',') #turn it into a string?
+                print(x) #now its a string
+                x= int(x[0]) #turn into an int() only value in y from tuple i think
+                #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+                #print ("Distance in inches:", sonic_inches)
+                
+
+            elif (x[5]=='R'):
+                print (x[:4])
+                x= (x[:4])
+                print ("6th string X:", x)
+                x= x.decode("ascii").split(',') #turn it into a string?
+                print(x) #now its a string
+                x= int(x[0]) #turn into an int() only value in y from tuple i think
+                #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+                #print ("Distance in inches:", sonic_inches)
+
+        #delay between scans
+        time.sleep(0.100)
+
+        #second scan
+        y= ser.read(6) #read 6 bytes  sometimes it doesnt hit R 
+        print("RAW ASCII VALUE")
+        ser.flushInput() #reset to collect more data
+        time.sleep(.001)
+        print (y, y[0], ord(y[0]))# "mm")
+                        
+        #THIS GETS INT FROM BYTE
+        if (y[0]=="R"):# is R the first of the numbers- encoded correctly
+            #print ("\nit works!\n")
+            y=y.strip(b'R\r') #strip the R and \r from value
+            y= y.decode("ascii").split(',') #turn it into a string?
+            print(y) #now its a string
+            y= int(y[0]) #turn into an int() only value in y from tuple i think
+                
+                #time.sleep (1)
+            #break
+
+        else:
+            ser.flushInput()
+            print("\nRESET BUFFER!! RESET BUFFER!! RESET BUFFER!!\n")
+            if (y[1]=='R'):
+                print (y[2:])
+                print (y[2:])
+                y= (y[2:])#from 2 to end
+                print ("2nd string:", y)
+                y= y.decode("ascii").split(',') #turn it into a string?
+                print(y) #now its a string
+                y= int(y[0]) #turn into an int() only value in y from tuple i think
+                    #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+                    #print ("Distance in inches:", sonic_inches)
+                        
+                        
+            elif (y[2]=='R'):
+                print (y[3:],y[0])
+                print (y[3:]+ y[0])
+                y= (y[3:]+y[0])
+                print ("3rd string:", y)
+                y= y.decode("ascii").split(',') #turn it into a string?
+                print(y) #now its a string
+                y= int(y[0]) #turn into an int() only value in y from tuple i think
+                    #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+                    #print ("Distance in inches:", sonic_inches)
+                    
+                    
+            elif (y[3]=='R'):
+                print (y[4:],y[:2])
+                print (y[4:]+ y[:2])
+                y= (y[4:]+y[:2])
+                print ("4th string:", y)
+                y= y.decode("ascii").split(',') #turn it into a string?
+                print(y) #now its a string
+                y= int(y[0]) #turn into an int() only value in y from tuple i think
+                    #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+                    #print ("Distance in inches:", sonic_inches)
+                    
+
+            elif (y[4]=='R'):
+                print (y[5:],y[:3])
+                print (y[5:]+ y[:3])
+                y= (y[5:]+y[:3])
+                print ("5th string:", y)
+                y= y.decode("ascii").split(',') #turn it into a string?
+                print(y) #now its a string
+                y= int(y[0]) #turn into an int() only value in y from tuple i think
+                    #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+                    #print ("Distance in inches:", sonic_inches)
+                    
+
+            elif (y[5]=='R'):
+                print (y[:4])
+                y= (y[:4])
+                print ("6th string:", y)
+                y= y.decode("ascii").split(',') #turn it into a string?
+                print(y) #now its a string
+                y= int(y[0]) #turn into an int() only value in y from tuple i think
+                    #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+                    #print ("Distance in inches:", sonic_inches)
+        
+
+        #compare 2 scans
+        if (x<(y+scan_var)) and (x> (y-scan_var)):
+            #is x both less than 1 scan_var lower and less than 1 scan var higher
+            qc=(True)
+            print ("INSIDE TOLERANCE!")
+        else:
+            print ("OUTSIDE TOLERANCE! OUTSIDE TOLERANCE! RE-INITIATE!")
+        print ("PAIR OF SCANS COMPLETE")
+        #print ("distance (in mm) 1:", +str (x), "Distance (in mm) 2:", +str (y))
+
+
+    sonic_inches = round(((x+y)/2)*.03937,2) #convert to inches round to 2 decimal places
+    print ("in feet:",  round((sonic_inches/12),2))
+    #sonic_inches = round(y*0.3937,2)
+    print("average sonic inches:" , sonic_inches)
+    if (sonic_inches>=best_sonic_inches):
+        best_sonic_inches=sonic_inches
+        angle = round ((step_pos*360.0)/steps_in_motor)
+        best_step_goal=step_pos
+        #print("Range Distance:", R_dist_inches)
+    print("Best result:", best_sonic_inches, angle)     
+        #time.sleep(30)
+    
+def ultrasonic_scan_lite():
+    #while True:
+    global best_sonic_inches
+    global angle
+    global best_step_goal
+    global sonic_inches
+    y= ser.read(6) #read 6 bytes  sometimes it doesnt hit R
+    print("RAW ASCII VALUE")
+    ser.flushInput() #reset to collect more data
+    time.sleep(.001)
+    print (y, y[0], ord(y[0]))# "mm")
+                
+    #THIS GETS INT FROM BYTE
+    if (y[0]=="R"):# is R the first of the numbers- encoded correctly
+        #print ("\nit works!\n")
+        y=y.strip(b'R\r') #strip the R and \r from value
+        y= y.decode("ascii").split(',') #turn it into a string?
+        print(y) #now its a string
+        y= int(y[0]) #turn into an int() only value in y from tuple i think
+        
+        #time.sleep (1)
+    #break
+
+    else:
+        ser.flushInput()
+        print("\nRESET BUFFER!! RESET BUFFER!! RESET BUFFER!!\n")
+        if (y[1]=='R'):
+            print (y[2:])
+            print (y[2:])
+            y= (y[2:])#from 2 to end
+            print ("2nd string:", y)
+            y= y.decode("ascii").split(',') #turn it into a string?
+            print(y) #now its a string
+            y= int(y[0]) #turn into an int() only value in y from tuple i think
+            #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+            #print ("Distance in inches:", sonic_inches)
+                
+                
+        elif (y[2]=='R'):
+            print (y[3:],y[0])
+            print (y[3:]+ y[0])
+            y= (y[3:]+y[0])
+            print ("3rd string:", y)
+            y= y.decode("ascii").split(',') #turn it into a string?
+            print(y) #now its a string
+            y= int(y[0]) #turn into an int() only value in y from tuple i think
+            #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+            #print ("Distance in inches:", sonic_inches)
+            
+            
+        elif (y[3]=='R'):
+            print (y[4:],y[:2])
+            print (y[4:]+ y[:2])
+            y= (y[4:]+y[:2])
+            print ("4th string:", y)
+            y= y.decode("ascii").split(',') #turn it into a string?
+            print(y) #now its a string
+            y= int(y[0]) #turn into an int() only value in y from tuple i think
+            #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+            #print ("Distance in inches:", sonic_inches)
+            
+
+        elif (y[4]=='R'):
+            print (y[5:],y[:3])
+            print (y[5:]+ y[:3])
+            y= (y[5:]+y[:3])
+            print ("5th string:", y)
+            y= y.decode("ascii").split(',') #turn it into a string?
+            print(y) #now its a string
+            y= int(y[0]) #turn into an int() only value in y from tuple i think
+            #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+            #print ("Distance in inches:", sonic_inches)
+            
+
+        elif (y[5]=='R'):
+            print (y[:4])
+            y= (y[:4])
+            print ("6th string:", y)
+            y= y.decode("ascii").split(',') #turn it into a string?
+            print(y) #now its a string
+            y= int(y[0]) #turn into an int() only value in y from tuple i think
+            #sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+            #print ("Distance in inches:", sonic_inches)
+
+
+    sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+    print ("Distance in inches:", sonic_inches)
+    if (sonic_inches>=best_sonic_inches):
+        best_sonic_inches=sonic_inches
+        angle = round ((step_pos*360.0)/steps_in_motor)
+        best_step_goal=step_pos
+        #print("Range Distance:", R_dist_inches)
+    print("Best result:", best_sonic_inches, angle)     
+        #time.sleep(30)
+            
+def command_step_move():
+    stepper_wake() #turn on easy driver
+    time.sleep(0.01)
+    global step_move
+    global step_pos
+    step_move=int((step_goal)-step_pos) 
+    #print ("\nstepper step move" + str(step_move))
+    if (step_move <0):
+        set_ccw()
+        step =-1
+    if (step_move>0):
+        set_cw()
+        step=1
+    #step motor to position
+    while step_pos != int(step_goal):
+        stepper_run()
+        step_pos+=step
+        #print (step_pos)
+        time.sleep(0.001)
+    print ((step_pos), (steps_in_motor), 360)
+    print ("STEPPER IN POSITION ", round((step_pos*360.0)/steps_in_motor,2), "DEGREES")
+    
+
+def zero_calibration():
+    global step_goal
+    step_goal=(0)
+    command_step_move()
+    stepper_sleep()
+     
+    print ("zero calibration (in calibration loop):",(step_goal))
+    #will change this when hall sensor gets installed
+    
+def coarse_scan():
+    global step_goal
+    scan_interval_count=(0)
+    accumulated_coarse_value=float(0)
+    zero_calibration()
+    global best_sonic_inches
+    best_sonic_inches=(0)
+    #step_goal=(0) # make zero to start scan
+    #command_step_move()#move to zero
+    
+    #scan at initial zero value
+    print("\nstep goal value" + str(step_goal))
+    time.sleep(0.2)
+    print ("\nFIRST SCAN COMMENCING")
+    print ("\nSCAN ANGLE:" + str ((step_goal)))#*360/steps_in_motor)))
+    ultrasonic_scan()
+    #time.sleep(0.1)
+    #print("SECOND SCAN")
+    #ultrasonic_scan()
+    step_goal=round(coarse_scan_value)
+    
+    while (step_goal <steps_in_motor):#1036 is total steps available plus 100 multiplier (5.18*200)
+        print("\nULTRASONIC SCAN")  
+    
+        #coarse scan intervals past zero begin:
+
+        if (scan_interval_count >0):
+            step_goal= (step_goal+(accumulated_coarse_value/scan_interval_count))
+        #print ("\nstep goal: " +str(step_goal)) # ideally 0-200 values or 1036 values
+        #print ("current step position " ,(step_pos))
+        scan_interval_count+=1
+        #spin stepper to position determine if forward or backward
+        #time.sleep(3)
+        command_step_move()
+        #print ("stepped to :", + str(step_goal)) 
+        #time.sleep(0.001)    
+        accumulated_coarse_value=float(accumulated_coarse_value + coarse_scan_value)
+    
+        print("\nstep goal value" + str(step_goal))
+        #time.sleep(5)
+        print ("\nSCANNING COMMENCING")
+        print ("\nSCAN ANGLE:" + str ((step_goal*360/steps_in_motor)))
+        #time.sleep(0.2)
+        #put scanning code here
+        ultrasonic_scan()
+        time.sleep(0.1)
+        print("SECOND SCAN")
+        ultrasonic_scan()
+        #time.sleep(5)
+    
+def fine_scan():
+    #begin fine scan
+    global step_goal
+    global step_move
+    print("FINE SCAN BEGIN")
+    print("best Step Goal: " , best_step_goal, angle)
+    print("current step pos:", step_pos)
+    print("current angle:" , (step_pos*360/steps_in_motor))
+    #time.sleep(20)
+    #first move 1 additional coarse scan arc, and set end point
+    #to backwards two coarse scan arcs.
+    #scan_interval_count=(0)
+    #step_goal=angle #angle from coarse scan 
+    step_move=int((best_step_goal+coarse_scan_value)-step_pos)
+    print("best step goal vs step move", best_step_goal, step_move)
+    #move back to best step move plus 1 coarse scan arc.
+    print("last good angle:", angle, "step move:", step_move)
+    print("best step goal& coarsescan val; ", best_step_goal, coarse_scan_value)
+
+    fine_scan_stop= int(best_step_goal-(coarse_scan_value)) #pass through 2 coarse arc
+    fine_scan_start=int(best_step_goal+coarse_scan_value)
+    print("fine_scn_stop" + str (fine_scan_stop))
+    print("stepping to start of fine step arc")
+    print ("begin/middle/end", int(fine_scan_start), best_step_goal, int(fine_scan_stop))
+    step_goal=fine_scan_start
+    time.sleep(1)
+    command_step_move()
+    #time.sleep(5)
+
+
+    print("Fine scan begins")
+    while (step_goal>fine_scan_stop):
+        step_goal= int((step_pos)-fine_scan_steps)
+        print ("\nstep goal: " +str(step_goal))  
+        print ("current step position " +str(step_pos))
+        time.sleep(1)
+        command_step_move()
+        
+        print("step to fine step scan")
+            
+
+        print ("STEPPER IN POSITION "+ str(step_pos*360/steps_in_motor))
+        
+        print ("\nFine Mode ultrasonic scan now!")
+        ultrasonic_scan()
+        time.sleep(0.1)
+        print("SECOND SCAN")
+        ultrasonic_scan()
+        
+
+    #STEP TO FINAL BEST ANGLE BEFORE MOVING
+    print(" Step to final best angle")
+    time.sleep(1)
+    step_move=((best_step_goal)-step_pos)
+    #NOTE BEST STEP GOAL NOT STEP GOAL
+    print ("\nstepper step move " + str(step_move))
+    print("\nstep goal value" + str(best_step_goal))
+    step_goal=best_step_goal
+    print("step to final target angle")
+    command_step_move()
+    
+            
+
+    print ("STEPPER IN POSITION "+ str(step_pos*360/steps_in_motor))
+    print ("clearing best sonic inches:")
+    best_sonic_inches=(0)
+    stepper_sleep()#disable stepper so it doesnt consume power 
+
+
+
+
+def kiwi_calc():
+    global wheel_1
+    global wheel_2
+    global wheel_3
+    global speed_factor
+    
+    angleRadian = math.radians(angle) #may delete this line
+    print("\nAngle:" + str (angle))
+    print("Radian: " + str (angleRadian))
+
+    vectorX= math.cos(math.radians(angle))
+    vectorY= math.sin(math.radians(angle))
+
+        
+    # code to zero out very low numbers on X&Y axis
+    if vectorX < 0.001 and vectorX > -0.001:
+        vectorX=0.0
+    if vectorY< 0.001 and vectorY> -0.001:
+        vectorY=0.0
+
+            
+    wheel_1= -(vectorX)
+    wheel_2= 0.5*(vectorX)-SqRt3o2*vectorY
+    wheel_3= 0.5*(vectorX)+SqRt3o2*vectorY
+    print("\nVector-X: ", vectorX)
+    print("Vector-Y: ", vectorY)
+
+    #these are the motor speed calc elements
+    print ("\nWHEEL MOTOR SPEED CALC")
+    print ("Wheel_1: ", wheel_1)
+    print ("Wheel_2: ", wheel_2)
+    print ("Wheel_3: ", wheel_3)
+
+    #keep it under 256
+    wheel_list=(abs(wheel_1),abs(wheel_2),abs(wheel_3))
+    print ("wheel list:" + str (wheel_list))
+    print max(wheel_list)
+    speed_factor= 255/(max(wheel_list))# BECAUSE 256 IS 255
+    print(speed_factor)
+   # time.sleep(15)
+    
+    #time.sleep(10)
+
+    #step_goal= int(angle/1.8)# destination of stepper ad no gears 200:1 step
+   # step_goal= int((angle/1.8)*5.18)#1.8 is 360/200steps * gearbox 5.18:1
+    #print ("step goal " +str(step_goal)) # ideally 0-200 values or 1036 values
+    #print ("current step position " +str(step_pos))
+
+
+
+        
+        
+    # Motor Clockwise/countrer clockwise based on wheel value
+    if ((wheel_1)>0):
+        (motorOne.run(Adafruit_MotorHAT.FORWARD))
+        print ("\nWheel_1 FORWARD")
+    elif((wheel_1)<0):
+        (motorOne.run(Adafruit_MotorHAT.BACKWARD))
+        print ("\nWheel_1 BACKWARD")
+    elif((wheel_1)==0):
+        (motorOne.run(Adafruit_MotorHAT.RELEASE))
+        print ("\nWheel_1 RELEASE")
+         
+    if((wheel_2)>0):
+        (motorTwo.run(Adafruit_MotorHAT.FORWARD))
+        print ("Wheel_2 FORWARD")
+    elif ((wheel_2)<0):
+        (motorTwo.run(Adafruit_MotorHAT.BACKWARD))
+        print ("Wheel_2 BACKWARD")
+    elif ((wheel_2)==0):
+        (motorTwo.run(Adafruit_MotorHAT.RELEASE))
+        print ("Wheel_2 RELEASE")
+     
+    if ((wheel_3)>0):
+        (motorThree.run(Adafruit_MotorHAT.FORWARD))
+        print ("Motor_3 FORWARD")
+    elif ((wheel_3)<0):
+        (motorThree.run(Adafruit_MotorHAT.BACKWARD))
+        print ("Motor_3 BACKWARD")
+    elif ((wheel_3)==0):
+        (motorThree.run(Adafruit_MotorHAT.RELEASE))
+        print("Motor_3 RELEASE")
+
+
+
+# recommended for auto-disabling motors on shutdown!
+def turnOffMotors():
+    mh.getMotor(1).run(Adafruit_MotorHAT.RELEASE)
+    mh.getMotor(2).run(Adafruit_MotorHAT.RELEASE)
+    mh.getMotor(3).run(Adafruit_MotorHAT.RELEASE)
+    mh.getMotor(4).run(Adafruit_MotorHAT.RELEASE)
+
+atexit.register(turnOffMotors)
+
+################################# DC motor test!
+motorOne = mh.getMotor(1)
+motorTwo = mh.getMotor(2)
+motorThree = mh.getMotor(3)
+
+
+
+
+while True:
+    print("ZERO CALIBRATION")
+    zero_calibration()
+    print(step_pos)
+    time.sleep(1)
+    step_goal=(1036)
+    print("step to 360 degrees")
+    command_step_move()
+    print(step_pos)
+    time.sleep(1)
+    
+    
+    #COARSE SCAN
+    print("best_sonic_inches", best_sonic_inches)
+    coarse_scan()
+    #time.sleep(1)
+
+    #FINE SCAN
+    fine_scan()
+    time.sleep(0.5)
+    
+    #CALCULATE WHEEL SPEED AND DIRECTION
+    kiwi_calc()  
+        
+
+        
+        
+    #BEGIN MOVEMENT
+
+        
+    print("\nout of scanning loop:")
+    activate_lasers()
+    #time.sleep(5)
+    #note full accel/decel : 3'3" or 39"
+
+    #time.sleep(3)
+    #globalThermoNuclearWar= raw_input("\nWould you like to play a game? ")
+    #if globalThermoNuclearWar=="y":
+
+        #angle = raw_input("what angle vector would you like to calculate? ")
+        #angle = int(angle)
+
+
+
+    for sensor_test in range(2000):
+        ultrasonic_scan()
+        print("ultrasonic distance" + str (sonic_inches))
+       
+        # Get distance from VL53L0X  on TCA9548A bus 1
+        distance = tof1.get_distance()
+        if (distance > 0):
+            print ("1: %d mm, %d cm" % (distance, (distance/10)))
+
+        # Get distance from VL53L0X  on TCA9548A bus 2
+        distance = tof2.get_distance()
+        if (distance > 0):
+            print ("2: %d mm, %d cm" % (distance, (distance/10)))
+        # Get distance from VL53L0X  on TCA9548A bus 3
+        distance = tofcliff.get_distance()
+        print ("cliff: %d mm, %d cm" % (distance, (distance/10)))
+        if (distance > 310):
+            print ("CLIFF!!!!!AGHHHHHH!")
+        time.sleep(0.066)
+
+
+
+       
+    #Accelerate!
+    ultrasonic_scan()
+    if (sonic_inches>0):
+        print ("ACCELRATE!")
+        for i in range(speed):
+            ii=float(i)
+
+            ultrasonic_scan()
+            # Get distance from VL53L0X  on TCA9548A bus 1
+            distance = tof1.get_distance()
+            if (distance > 0):
+                print ("1: %d mm, %d cm" % (distance, (distance/10)))
+
+            # Get distance from VL53L0X  on TCA9548A bus 2
+            distance = tof2.get_distance()
+            if (distance > 0):
+                print ("2: %d mm, %d cm" % (distance, (distance/10)))
+         # Get distance from VL53L0X  on TCA9548A bus 3
+            distance = tofcliff.get_distance()
+            print ("cliff: %d mm, %d cm" % (distance, (distance/10)))
+            if (distance > 310):
+                print ("CLIFF!!!!!AGHHHHHH!")
+                #break
+
+            
+            motorOne.setSpeed (int(round(abs(wheel_1)*speed_factor*(ii/speed))))
+            #print ("Wheel1 Speed: "+ str(int(round(abs(wheel_1)*speed_factor*(ii/speed)))))
+            motorTwo.setSpeed (int(round(abs(wheel_2)*speed_factor*(ii/speed))))
+            #print ("Wheel2 Speed: "+ str(int(round(abs(wheel_2)*speed_factor*(ii/speed)))))
+            motorThree.setSpeed (int(round(abs(wheel_3)*speed_factor*(ii/speed))))
+            #print ("Wheel3 Speed: " +str(int(round(abs(wheel_3)*speed_factor*(ii/speed)))))
+            time.sleep(.01)
+            #print (str(i))
+            #print (str (ii/speed))
+             # Get distance from VL53L0X  on TCA9548A bus 3
+            distance = tofcliff.get_distance()
+            #if (distance > 310):
+                #print ("cliff abort: %d mm, %d cm" % (distance, (distance/10)))
+               # break
+            time.sleep (0.001)
+
+
+    #FULL SPEED
+        #full speed is 16"/s and full accel decel is 39"
+    print ("FULL SPEED")
+    ultrasonic_scan()
+    if (sonic_inches> 40):
+        print("inches of accel/time;", (sonic_inches-20), (sonic_inches/16))
+        time.sleep((sonic_inches-40)/16)       
+        
+    
+    #time.sleep(2)
+
+    #Decelerate!
+    ultrasonic_scan()
+    if (sonic_inches>0):
+        
+        print ("DECELERATE!")
+        for i in reversed(range(speed)):
+
+            ii=float(i)
+
+            ultrasonic_scan()
+            # Get distance from VL53L0X  on TCA9548A bus 1
+            distance = tof1.get_distance()
+            if (distance > 0):
+                print ("1: %d mm, %d cm" % (distance, (distance/10)))
+
+            # Get distance from VL53L0X  on TCA9548A bus 2
+            distance = tof2.get_distance()
+            if (distance > 0):
+                print ("2: %d mm, %d cm" % (distance, (distance/10)))
+         # Get distance from VL53L0X  on TCA9548A bus 3
+            distance = tofcliff.get_distance()
+            print ("cliff: %d mm, %d cm" % (distance, (distance/10)))
+            if (distance > 310):
+                print ("CLIFF!!!!!AGHHHHHH!")
+
+
+
+            
+            motorOne.setSpeed (int(round(abs(wheel_1)*255*(ii/speed))))
+            #print ("Wheel1 Speed: "+ str(int(round(abs(wheel_1)*255*(ii/speed)))))
+            motorTwo.setSpeed (int(round(abs(wheel_2)*255*(ii/speed))))
+            #print ("Wheel2 Speed: "+ str(int(round(abs(wheel_2)*255*(ii/speed)))))
+            motorThree.setSpeed (int(round(abs(wheel_3)*255*(ii/speed))))
+            #print ("Wheel3 Speed: " +str(int(round(abs(wheel_3)*255*(ii/speed)))))
+            time.sleep(.01)
+            #print (str(i))
+            #print (str (ii/speed))
+            time.sleep(0.01)
+        
+        print("angle of travel & distance", angle, best_sonic_inches)
+        print("Release")
+
+        #step_goal=initial_step_goal# trying to reset step goal
+
+        motorOne.run(Adafruit_MotorHAT.RELEASE)
+        motorTwo.run(Adafruit_MotorHAT.RELEASE)
+        motorThree.run(Adafruit_MotorHAT.RELEASE)
+
+        time.sleep(1.0)
+        go_again= raw_input("\nWould you like to go again? ")
+        if go_again=="n":
+            zero_calibration()
+            stepper_sleep()
+            print("GOOD BYE. KLAATU BARADA NIKTO.")
+            break
