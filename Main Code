@@ -55,7 +55,7 @@ step_pos=int(0) #initial stepper position
 
 print("step_pos" + str(step_pos))
 
-steps_in_motor= int(200*5.18) #steps in motor*gearbox=1036
+steps_in_motor= int(200*5.40) #steps in motor*gearbox=1080 or 3 steps per degree of 360
 print("\nsteps_in_motor" + str (steps_in_motor))
 
 coarse_scan_angle=int(10) # degree angle of coarse scan
@@ -79,7 +79,7 @@ cliff_nominal=int(350) #floor height maybe in mm?
 #scan_interval_count= int(0)#  scan interval start at 0
 
 
-fine_scan_steps= int(6) # ach 3 steps = 1.04 degrees
+fine_scan_steps= int(6) # ach 3 steps = 1.00 degrees
 print("\nFine Scan STEPS:" + str (fine_scan_steps))
 
 
