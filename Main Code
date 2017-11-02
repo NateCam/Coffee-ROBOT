@@ -47,6 +47,7 @@ tofcliff.start_ranging(VL53L0X.VL53L0X_BETTER_ACCURACY_MODE)
 #VL53L0X_BEST_ACCURACY_MODE
 #VL53L0X_LONG_RANGE_ACCURACY_MODE
 #VL53L0X_HIGH_SPEED_MODE
+#range is from 50mm to 1200mm or 2 inches to 47 inches (4 ft)
 
 #LIST OF DEFINITIONS      
 best_sonic_inches= round(float(0),2)#initial value for best ultrasonicdistance
@@ -69,7 +70,7 @@ SqRt3o2 = math.sqrt(3/2) # do math here so it doesnt calc square every loop
 speed=int(50) #this affects for loop in acceleration.  need to check
 #accumulated_coarse_value=float(0)
 
-scan_var= int(254) #mm of +/- allowavle variation of 2 scans
+scan_var= int(254) #mm of +/- allowable variation of 2 scans
 
 cliff_nominal=int(350) #floor height maybe in mm?
 #initial_step_goal=round(coarse_scan_value)
@@ -121,6 +122,12 @@ gpio.setup(24, gpio.OUT) #step
 gpio.setup(5,gpio.OUT) #MS1 blue wire
 gpio.setup(6, gpio.OUT) #MS2 purple wire
 gpio.setup(13, gpio.OUT) #sleep brown wire
+
+#GPIO hall sensor
+#connected to 3V out!
+gpio.setup(8, gpio.IN) # hall effect sensor
+#if High then no magnet
+
 
 #stepper definitions
 def stepper_run():
@@ -460,13 +467,29 @@ def command_step_move():
     
 
 def zero_calibration():
-    global step_goal
-    step_goal=(0)
-    command_step_move()
-    stepper_sleep()
+    #global step_goal
+    #step_goal=(0)
+    #command_step_move()
+    #stepper_sleep()
      
-    print ("zero calibration (in calibration loop):",(step_goal))
+    #print ("zero calibration (in calibration loop):",(step_goal))
     #will change this when hall sensor gets installed
+   # if gpio.input(8): #if high (not near magnet)
+    while True:
+        #stepper_wake() 
+        time.sleep(0.1)
+        set_ccw()
+        if gpio.input(8): 
+            #stepper run()
+            print ("Stepping") 
+        else:
+            print ("MAGNET DETECT!")
+    
+    
+    
+ 
+
+
     
 def coarse_scan():
     global step_goal
@@ -696,7 +719,7 @@ while True:
     zero_calibration()
     print(step_pos)
     time.sleep(1)
-    step_goal=(1036)
+    step_goal=(1080)
     print("step to 360 degrees")
     command_step_move()
     print(step_pos)
