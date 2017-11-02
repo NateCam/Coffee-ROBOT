@@ -79,6 +79,8 @@ cliff_nominal=int(350) #floor height maybe in mm?
 
 #scan_interval_count= int(0)#  scan interval start at 0
 
+hall= int(8)   # hall effect sensor pin number
+
 
 fine_scan_steps= int(6) # ach 3 steps = 1.00 degrees
 print("\nFine Scan STEPS:" + str (fine_scan_steps))
@@ -465,25 +467,40 @@ def command_step_move():
     print ((step_pos), (steps_in_motor), 360)
     print ("STEPPER IN POSITION ", round((step_pos*360.0)/steps_in_motor,2), "DEGREES")
     
-
+def my_callback(channel):  
+    if gpio.input(hall):     # if port for HALL sensor == 1  
+        print "Rising edge detected on hall"  
+    else:                  # if port HALL SENSOR != 1  
+        print "Falling edge detected on hall"  
+        
 def zero_calibration():
     #global step_goal
     #step_goal=(0)
     #command_step_move()
     #stepper_sleep()
-     
+     #GPIO.setup(25, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)   
     #print ("zero calibration (in calibration loop):",(step_goal))
     #will change this when hall sensor gets installed
-   # if gpio.input(8): #if high (not near magnet)
+   # if gpio.input(hall): #if high (not near magnet)
     while True:
+        #gpio.setup(hall, gpio.IN, pull_up_down = gpio.PUD_UP)
         #stepper_wake() 
         time.sleep(0.1)
         set_ccw()
-        if gpio.input(8): 
+        gpio.add_event_detect(hall, gpio.BOTH, callback=my_callback)
+        #PIO.add_event_detect(17, GPIO.FALLING, print("falling"))
+        if(gpio.input(hall) ==1):
             #stepper run()
             print ("Stepping") 
         else:
             print ("MAGNET DETECT!")
+        #gpio.add_event_detect(hall, gpio.RISING)  # add rising edge detection on a channel
+        #if gpio.event_detected(hall):
+            #print('rising detected')
+        #gpio.add_event_detect(hall,gpio.FALLING)
+        #if gpio.event_detected(hall)
+         
+        
     
     
     
