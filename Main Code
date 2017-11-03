@@ -79,7 +79,7 @@ cliff_nominal=int(350) #floor height maybe in mm?
 
 #scan_interval_count= int(0)#  scan interval start at 0
 
-hall= int(8)   # hall effect sensor pin number
+hall= int(25)   # hall effect sensor pin number
 
 
 fine_scan_steps= int(6) # ach 3 steps = 1.00 degrees
@@ -119,7 +119,8 @@ gpio.setmode(gpio.BCM)
 gpio.setwarnings(False)
 
 #GPIO for easyDriver stepper driver
-gpio.setup(23, gpio.OUT)# direction
+gpio.setup(23, gpio.OUT)# direction lower stepper motor
+gpio.setup(22, gpio.OUT)# directiion upper stepper motor
 gpio.setup(24, gpio.OUT) #step
 gpio.setup(5,gpio.OUT) #MS1 blue wire
 gpio.setup(6, gpio.OUT) #MS2 purple wire
@@ -127,22 +128,24 @@ gpio.setup(13, gpio.OUT) #sleep brown wire
 
 #GPIO hall sensor
 #connected to 3V out!
-gpio.setup(8, gpio.IN) # hall effect sensor
+gpio.setup(hall, gpio.IN) # hall effect sensor
 #if High then no magnet
 
 
 #stepper definitions
 def stepper_run():
     gpio.output(24,0)
-    time.sleep(0.001)
+    time.sleep(0.01)
     gpio.output(24,1)
-    time.sleep(0.001)
+    time.sleep(0.01)
 
 def set_cw():
     gpio.output(23,0)
+    gpio.output(22,1)
     
 def set_ccw():
     gpio.output(23,1)
+    gpio.output(22,0)
 
 def ms_steps():
     gpio.output(5,0)
@@ -529,14 +532,14 @@ def coarse_scan():
     #ultrasonic_scan()
     step_goal=round(coarse_scan_value)
     
-    while (step_goal <steps_in_motor):#1036 is total steps available plus 100 multiplier (5.18*200)
+    while (step_goal <steps_in_motor):#1080 is total steps available plus 100 multiplier (5.40*200)
         print("\nULTRASONIC SCAN")  
     
         #coarse scan intervals past zero begin:
 
         if (scan_interval_count >0):
             step_goal= (step_goal+(accumulated_coarse_value/scan_interval_count))
-        #print ("\nstep goal: " +str(step_goal)) # ideally 0-200 values or 1036 values
+        #print ("\nstep goal: " +str(step_goal)) # ideally 0-200 values or 1080 values
         #print ("current step position " ,(step_pos))
         scan_interval_count+=1
         #spin stepper to position determine if forward or backward
@@ -904,5 +907,6 @@ while True:
         if go_again=="n":
             zero_calibration()
             stepper_sleep()
+            gpio.cleanup()
             print("GOOD BYE. KLAATU BARADA NIKTO.")
             break
