@@ -1,3 +1,817 @@
+#!/usr/bin/python
+#chassisTest3- stepper pionts sensor pckage to desired travel  body moves in desired direction with accel/decel
+#lrscan = calculates coarse and fine scan steps but does not actually activate ultrasonic sensor
+#scan2.py = intigrates serial_com.py for actual ultrasonic ranges
+from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
+
+import time
+import atexit
+import math
+import RPi.GPIO as gpio
+import sys
+import serial
+print ("SERIAL TEST")
+ser = serial.Serial(port='/dev/ttyS0',baudrate = 9600,parity = serial.PARITY_NONE,stopbits=serial.STOPBITS_ONE,
+        bytesize=serial.EIGHTBITS,timeout=1)
+
+
+# 27:1 motot R G Y B  Normal motor B G R B
+#pin setup
+gpio.setmode(gpio.BCM)
+gpio.setwarnings(False)
+
+gpio.setup(23, gpio.OUT)# step
+gpio.setup(24, gpio.OUT) #direction
+gpio.setup(5,gpio.OUT) #MS1
+gpio.setup(6, gpio.OUT) #MS2
+
+#stepper definitions
+def stepper_run():
+    gpio.output(23,0)
+    time.sleep(0.001)
+    gpio.output(23,1)
+    time.sleep(0.001)
+
+def set_cw():
+    gpio.output(24,0)
+    
+def set_ccw():
+    gpio.output(24,1)
+
+def ms_steps():
+    gpio.output(5,0)
+    gpio.output(6,0)
+
+def ultrasonic_scan():
+    while True:
+        y= ser.read(6) #read 6 bytes  sometimes it doesnt hit R
+        print("RAW VALUE")
+        ser.flushInput() #reset to collect more data
+        time.sleep(.001)
+        print (y, y[0], ord(y[0]))
+        global best_sonic_inches
+        global angle
+        global best_step_goal
+        #THIS GETS INT FROM BYTE
+        if (y[0]=="R"):# is R the first of the numbers- encoded correctly
+            #print ("\nit works!\n")
+            y=y.strip(b'R\r') #strip the R and \r from value
+            y= y.decode("ascii").split(',') #turn it into a string?
+            print(y) #now its a string
+            y= int(y[0]) #turn into an int() only value in y from tuple i think
+            sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+            print ("Distance in inches:", sonic_inches)
+            if (sonic_inches>=best_sonic_inches):
+                best_sonic_inches=sonic_inches
+                angle = round ((step_pos*360.0)/steps_in_motor)
+                best_step_goal=step_pos
+            #print("Range Distance:", R_dist_inches)
+            print("Best result:", best_sonic_inches, angle)
+            time.sleep (1)
+            break
+        
+        else:
+            ser.flushInput()
+            print("\nRESET BUFFER!! RESET BUFFER!! RESET BUFFER!!\n")
+
+#LIST OF DEFINITIONS      
+best_sonic_inches= round(float(0),2)#initial value for best ultrasonic distance
+step_pos=int(0) #initial stepper position
+print("step_pos" + str(step_pos))
+
+steps_in_motor= int(200*5.18) #steps in motor*gearbox=1036
+print("\nsteps_in_motor" + str (steps_in_motor))
+
+coarse_scan_angle=int(10) # degree angle of coarse scan
+print("\ncoarse_scan_angle;" + str(coarse_scan_angle))
+coarse_scan_value= float(coarse_scan_angle*steps_in_motor/360.0)# carry decimal for accumulating errors
+print ("\ncoarse_scan_value" +str(coarse_scan_value))
+accumulated_coarse_value=float(0)
+step_goal=round(coarse_scan_value)
+scan_interval_count= int(0)#  scan interval start at 0
+
+
+fine_scan_steps= int(6) # ach 3 steps = 1.04 degrees
+print("\nFine Scan STEPS:" + str (fine_scan_steps))
+
+
+# create a default object, no changes to I2C address or frequency
+mh = Adafruit_MotorHAT(addr=0x60)
+
+# recommended for auto-disabling motors on shutdown!
+def turnOffMotors():
+    mh.getMotor(1).run(Adafruit_MotorHAT.RELEASE)
+    mh.getMotor(2).run(Adafruit_MotorHAT.RELEASE)
+    mh.getMotor(3).run(Adafruit_MotorHAT.RELEASE)
+    mh.getMotor(4).run(Adafruit_MotorHAT.RELEASE)
+
+atexit.register(turnOffMotors)
+
+################################# DC motor test!
+motorOne = mh.getMotor(1)
+motorTwo = mh.getMotor(2)
+motorThree = mh.getMotor(3)
+
+# set the speed to start, from 0 (off) to 255 (max speed)
+motorOne.setSpeed(150)
+motorOne.run(Adafruit_MotorHAT.FORWARD);
+# turn on motor
+motorOne.run(Adafruit_MotorHAT.RELEASE);
+
+motorTwo.setSpeed(150)
+motorTwo.run(Adafruit_MotorHAT.FORWARD);
+# turn on motor
+motorTwo.run(Adafruit_MotorHAT.RELEASE);
+
+motorThree.setSpeed(150)
+motorThree.run(Adafruit_MotorHAT.FORWARD);
+# turn on motor
+motorThree.run(Adafruit_MotorHAT.RELEASE);
+SqRt3o2 = math.sqrt(3/2) # do math here so it doesnt calc square every loop
+speed= int(120)
+
+
+
+
+#COARSE SCAN
+
+while (step_goal <steps_in_motor):#1036 is total steps available plus 100 multiplier (5.18*200)
+    print("\nULTRASONIC SCAN")  
+    
+    #coarse scan begin:
+
+    if (scan_interval_count >0):
+        step_goal= (step_goal+(accumulated_coarse_value/scan_interval_count))
+    #print ("\nstep goal: " +str(step_goal)) # ideally 0-200 values or 1036 values
+    #print ("current step position " ,(step_pos))
+    scan_interval_count+=1
+    #spin stepper to position determine if forward or backward
+    
+    step_move=int((step_goal)-step_pos) 
+    #print ("\nstepper step move" + str(step_move))
+    if (step_move <0):
+        set_ccw()
+        step =-1
+    if (step_move>0):
+        set_cw()
+        step=1
+    #step motor to position
+    while step_pos != int(step_goal):
+        stepper_run()
+        step_pos+=step
+        #print (step_pos)
+    print ((step_pos), (steps_in_motor), 360)
+    print ("STEPPER IN POSITION ", round((step_pos*360.0)/steps_in_motor,2), "DEGREES")
+    time.sleep(0.001)    
+    accumulated_coarse_value=float(accumulated_coarse_value + coarse_scan_value)
+    
+    print("\nstep goal value" + str(step_goal))
+    
+    print ("\nSCANNING COMMENCING")
+    
+    #put scanning code here
+    ultrasonic_scan()
+    
+
+
+
+#begin fine scan
+print("FINE SCAN BEGIN")
+print("best Step Goal: " , best_step_goal, angle)
+#time.sleep(20)
+#first move 1 additional coarse scan arc, and set end point
+#to backwards two coarse scan arcs.
+scan_interval_count=(0)
+#step_goal=angle #angle from coarse scan 
+step_move=int((best_step_goal+coarse_scan_value)-step_pos)
+print("best step goal vs step move", best_step_goal, step_move)
+#move back to best step move plus 1 coarse scan arc.
+print("last good angle:", angle, "step move:", step_move)
+print("best step goal& coarsescan val; ", best_step_goal, coarse_scan_value)
+#print ("\nstepper step move" + str(step_move))
+time.sleep(20)
+if (step_move <0):
+    set_ccw()
+    step =-1
+if (step_move>0):
+    set_cw()
+    step=1
+#step motor to position
+    
+#step_goal= (step_goal-coarse_sca)# go back 1 coarse arc,
+#print(" about to do fine scan sweep")
+fine_scan_stop= int(best_step_goal-(coarse_scan_value)) #pass through 2 coarse arc
+fine_scan_start=int(best_step_goal+coarse_scan_value)
+print("fine_scn_stop" + str (fine_scan_stop))
+print("stepping to start of fine step arc")
+print ("begin/middle/end", int(fine_scan_start), best_step_goal, int(fine_scan_stop))
+time.sleep(15)
+while step_pos != int(fine_scan_start):
+    
+    
+    step_pos+=step
+    print (step_pos)
+    #print("stepping to start of fine step arc")
+    time.sleep (0.001)
+    
+
+time.sleep(30)
+
+
+
+while (step_goal>fine_scan_stop):
+    step_goal= int((step_pos)-fine_scan_steps)
+    print ("\nstep goal: " +str(step_goal))  
+    print ("current step position " +str(step_pos))
+    #time.sleep(1)
+    
+    step_move=((step_goal)-step_pos) 
+    print ("\nstepper step move " + str(step_move))
+    print("\nstep goal value" + str(step_goal))
+
+    
+    
+    if (step_move <0):
+        set_ccw()
+        step =-1
+    if (step_move>0):
+        set_cw()
+        step=1
+    #step motor to position
+    while step_pos != int(step_goal):
+        stepper_run()
+        step_pos+=step
+        print (step_pos)
+        time.sleep(0.1)
+        print("step to fine step scan")
+        
+
+    print ("STEPPER IN POSITION "+ str(step_pos*360/steps_in_motor))
+    
+    print ("\nFine Mode SCANNING COMMENCING")
+    ultrasonic_scan()
+
+#STEP TO FINAL BEST ANGLE BEFORE MOVING
+print(" Step to final best angle")
+time.sleep(3)
+step_move=((best_step_goal)-step_pos)
+#NOTE BEST STEP GOAL NOT STEP GOAL
+print ("\nstepper step move " + str(step_move))
+print("\nstep goal value" + str(best_step_goal))
+
+    
+    
+if (step_move <0):
+    set_ccw()
+    step =-1
+if (step_move>0):
+    set_cw()
+    step=1
+    #step motor to position
+while step_pos != int(best_step_goal):
+#NOTE BEST STEP GOAL NOT STEP GOAL
+    stepper_run()
+    step_pos+=step
+    print (step_pos)
+    time.sleep(0.1)
+    print("step to final target")
+        
+
+print ("STEPPER IN POSITION "+ str(step_pos*360/steps_in_motor))
+    
+    
+    
+
+    
+    
+#BEGIN MOVEMENT
+
+    
+print("\nout of scanning loop:")
+time.sleep(45)
+#globalThermoNuclearWar= raw_input("\nWould you like to play a game? ")
+#if globalThermoNuclearWar=="y":
+
+    #angle = raw_input("what angle vector would you like to calculate? ")
+    #angle = int(angle)
+angleRadian = math.radians(angle) #may delete this line
+print("\nAngle:" + str (angle))
+print("Radian: " + str (angleRadian))
+
+vectorX= math.cos(math.radians(angle))
+vectorY= math.sin(math.radians(angle))
+
+    
+# code to zero out very low numbers on X&Y axis
+if vectorX < 0.001 and vectorX > -0.001:
+    vectorX=0.0
+if vectorY< 0.001 and vectorY> -0.001:
+    vectorY=0.0
+
+        
+wheel_1= -(vectorX)
+wheel_2= 0.5*(vectorX)-SqRt3o2*vectorY
+wheel_3= 0.5*(vectorX)+SqRt3o2*vectorY
+print("\nVector-X: "+ str (vectorX))
+print("Vector-Y: "+ str (vectorY))
+
+#these are the motor speed calc elements
+print ("\nWHEEL MOTOR SPEED CALC")
+print ("Wheel_1: " + str (wheel_1))
+print ("Wheel_2: " + str (wheel_2))
+print ("Wheel_3: " + str (wheel_3))
+
+#step_goal= int(angle/1.8)# destination of stepper ad no gears 200:1 step
+step_goal= int((angle/1.8)*5.18)#1.8 is 360/200steps * gearbox 5.18:1
+print ("step goal " +str(step_goal)) # ideally 0-200 values or 1036 values
+print ("current step position " +str(step_pos))
+
+
+
+    
+    
+# Motor Clockwise/countrer clockwise based on wheel value
+if ((wheel_1)>0):
+    (motorOne.run(Adafruit_MotorHAT.FORWARD))
+    print ("\nWheel_1 FORWARD")
+elif((wheel_1)<0):
+    (motorOne.run(Adafruit_MotorHAT.BACKWARD))
+    print ("\nWheel_1 BACKWARD")
+elif((wheel_1)==0):
+    (motorOne.run(Adafruit_MotorHAT.RELEASE))
+    print ("\nWheel_1 RELEASE")
+     
+if((wheel_2)>0):
+    (motorTwo.run(Adafruit_MotorHAT.FORWARD))
+    print ("Wheel_2 FORWARD")
+elif ((wheel_2)<0):
+    (motorTwo.run(Adafruit_MotorHAT.BACKWARD))
+    print ("Wheel_2 BACKWARD")
+elif ((wheel_2)==0):
+    (motorTwo.run(Adafruit_MotorHAT.RELEASE))
+    print ("Wheel_2 RELEASE")
+ 
+if ((wheel_3)>0):
+    (motorThree.run(Adafruit_MotorHAT.FORWARD))
+    print ("Motor_3 FORWARD")
+elif ((wheel_3)<0):
+    (motorThree.run(Adafruit_MotorHAT.BACKWARD))
+    print ("Motor_3 BACKWARD")
+elif ((wheel_3)==0):
+    (motorThree.run(Adafruit_MotorHAT.RELEASE))
+    print("Motor_3 RELEASE")
+#Accelerate!
+print ("ACCELRATE!")
+for i in range(speed):
+    ii=float(i)
+    
+    motorOne.setSpeed (int(round(abs(wheel_1)*255*(ii/speed))))
+    print ("Wheel1 Speed: "+ str(int(round(abs(wheel_1)*255*(ii/speed)))))
+    motorTwo.setSpeed (int(round(abs(wheel_2)*255*(ii/speed))))
+    print ("Wheel2 Speed: "+ str(int(round(abs(wheel_2)*255*(ii/speed)))))
+    motorThree.setSpeed (int(round(abs(wheel_3)*255*(ii/speed))))
+    print ("Wheel3 Speed: " +str(int(round(abs(wheel_3)*255*(ii/speed)))))
+    time.sleep(.01)
+    print (str(i))
+    print (str (ii/speed))
+    time.sleep (0.001)
+
+
+#FULL SPEED
+#print ("FULL SPEED")
+#time.sleep(1.5)
+
+#Decelerate!
+print ("DECELERATE!")
+for i in reversed(range(speed)):
+
+    ii=float(i) 
+    motorOne.setSpeed (int(round(abs(wheel_1)*255*(ii/speed))))
+    print ("Wheel1 Speed: "+ str(int(round(abs(wheel_1)*255*(ii/speed)))))
+    motorTwo.setSpeed (int(round(abs(wheel_2)*255*(ii/speed))))
+    print ("Wheel2 Speed: "+ str(int(round(abs(wheel_2)*255*(ii/speed)))))
+    motorThree.setSpeed (int(round(abs(wheel_3)*255*(ii/speed))))
+    print ("Wheel3 Speed: " +str(int(round(abs(wheel_3)*255*(ii/speed)))))
+    time.sleep(.01)
+    print (str(i))
+    print (str (ii/speed))
+    time.sleep(0.01)
+    
+print("angle of travel", angle)
+print("Release")
+
+motorOne.run(Adafruit_MotorHAT.RELEASE)
+motorTwo.run(Adafruit_MotorHAT.RELEASE)
+motorThree.run(Adafruit_MotorHAT.RELEASE)
+
+time.sleep(1.0)
+#!/usr/bin/python
+#chassisTest3- stepper pionts sensor pckage to desired travel  body moves in desired direction with accel/decel
+#lrscan = calculates coarse and fine scan steps but does not actually activate ultrasonic sensor
+#scan2.py = intigrates serial_com.py for actual ultrasonic ranges
+from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
+
+import time
+import atexit
+import math
+import RPi.GPIO as gpio
+import sys
+import serial
+print ("SERIAL TEST")
+ser = serial.Serial(port='/dev/ttyS0',baudrate = 9600,parity = serial.PARITY_NONE,stopbits=serial.STOPBITS_ONE,
+        bytesize=serial.EIGHTBITS,timeout=1)
+
+
+# 27:1 motot R G Y B  Normal motor B G R B
+#pin setup
+gpio.setmode(gpio.BCM)
+gpio.setwarnings(False)
+
+gpio.setup(23, gpio.OUT)# step
+gpio.setup(24, gpio.OUT) #direction
+gpio.setup(5,gpio.OUT) #MS1
+gpio.setup(6, gpio.OUT) #MS2
+
+#stepper definitions
+def stepper_run():
+    gpio.output(23,0)
+    time.sleep(0.001)
+    gpio.output(23,1)
+    time.sleep(0.001)
+
+def set_cw():
+    gpio.output(24,0)
+    
+def set_ccw():
+    gpio.output(24,1)
+
+def ms_steps():
+    gpio.output(5,0)
+    gpio.output(6,0)
+
+def ultrasonic_scan():
+    while True:
+        y= ser.read(6) #read 6 bytes  sometimes it doesnt hit R
+        print("RAW VALUE")
+        ser.flushInput() #reset to collect more data
+        time.sleep(.001)
+        print (y, y[0], ord(y[0]))
+        global best_sonic_inches
+        global angle
+        global best_step_goal
+        #THIS GETS INT FROM BYTE
+        if (y[0]=="R"):# is R the first of the numbers- encoded correctly
+            #print ("\nit works!\n")
+            y=y.strip(b'R\r') #strip the R and \r from value
+            y= y.decode("ascii").split(',') #turn it into a string?
+            print(y) #now its a string
+            y= int(y[0]) #turn into an int() only value in y from tuple i think
+            sonic_inches = round(y*.03937,2) #convert to inches round to 2 decimal places
+            print ("Distance in inches:", sonic_inches)
+            if (sonic_inches>=best_sonic_inches):
+                best_sonic_inches=sonic_inches
+                angle = round ((step_pos*360.0)/steps_in_motor)
+                best_step_goal=step_pos
+            #print("Range Distance:", R_dist_inches)
+            print("Best result:", best_sonic_inches, angle)
+            time.sleep (1)
+            break
+        
+        else:
+            ser.flushInput()
+            print("\nRESET BUFFER!! RESET BUFFER!! RESET BUFFER!!\n")
+
+#LIST OF DEFINITIONS      
+best_sonic_inches= round(float(0),2)#initial value for best ultrasonic distance
+step_pos=int(0) #initial stepper position
+print("step_pos" + str(step_pos))
+
+steps_in_motor= int(200*5.18) #steps in motor*gearbox=1036
+print("\nsteps_in_motor" + str (steps_in_motor))
+
+coarse_scan_angle=int(10) # degree angle of coarse scan
+print("\ncoarse_scan_angle;" + str(coarse_scan_angle))
+coarse_scan_value= float(coarse_scan_angle*steps_in_motor/360.0)# carry decimal for accumulating errors
+print ("\ncoarse_scan_value" +str(coarse_scan_value))
+accumulated_coarse_value=float(0)
+step_goal=round(coarse_scan_value)
+scan_interval_count= int(0)#  scan interval start at 0
+
+
+fine_scan_steps= int(6) # ach 3 steps = 1.04 degrees
+print("\nFine Scan STEPS:" + str (fine_scan_steps))
+
+
+# create a default object, no changes to I2C address or frequency
+mh = Adafruit_MotorHAT(addr=0x60)
+
+# recommended for auto-disabling motors on shutdown!
+def turnOffMotors():
+    mh.getMotor(1).run(Adafruit_MotorHAT.RELEASE)
+    mh.getMotor(2).run(Adafruit_MotorHAT.RELEASE)
+    mh.getMotor(3).run(Adafruit_MotorHAT.RELEASE)
+    mh.getMotor(4).run(Adafruit_MotorHAT.RELEASE)
+
+atexit.register(turnOffMotors)
+
+################################# DC motor test!
+motorOne = mh.getMotor(1)
+motorTwo = mh.getMotor(2)
+motorThree = mh.getMotor(3)
+
+# set the speed to start, from 0 (off) to 255 (max speed)
+motorOne.setSpeed(150)
+motorOne.run(Adafruit_MotorHAT.FORWARD);
+# turn on motor
+motorOne.run(Adafruit_MotorHAT.RELEASE);
+
+motorTwo.setSpeed(150)
+motorTwo.run(Adafruit_MotorHAT.FORWARD);
+# turn on motor
+motorTwo.run(Adafruit_MotorHAT.RELEASE);
+
+motorThree.setSpeed(150)
+motorThree.run(Adafruit_MotorHAT.FORWARD);
+# turn on motor
+motorThree.run(Adafruit_MotorHAT.RELEASE);
+SqRt3o2 = math.sqrt(3/2) # do math here so it doesnt calc square every loop
+speed= int(120)
+
+
+
+
+#COARSE SCAN
+
+while (step_goal <steps_in_motor):#1036 is total steps available plus 100 multiplier (5.18*200)
+    print("\nULTRASONIC SCAN")  
+    
+    #coarse scan begin:
+
+    if (scan_interval_count >0):
+        step_goal= (step_goal+(accumulated_coarse_value/scan_interval_count))
+    #print ("\nstep goal: " +str(step_goal)) # ideally 0-200 values or 1036 values
+    #print ("current step position " ,(step_pos))
+    scan_interval_count+=1
+    #spin stepper to position determine if forward or backward
+    
+    step_move=int((step_goal)-step_pos) 
+    #print ("\nstepper step move" + str(step_move))
+    if (step_move <0):
+        set_ccw()
+        step =-1
+    if (step_move>0):
+        set_cw()
+        step=1
+    #step motor to position
+    while step_pos != int(step_goal):
+        stepper_run()
+        step_pos+=step
+        #print (step_pos)
+    print ((step_pos), (steps_in_motor), 360)
+    print ("STEPPER IN POSITION ", round((step_pos*360.0)/steps_in_motor,2), "DEGREES")
+    time.sleep(0.001)    
+    accumulated_coarse_value=float(accumulated_coarse_value + coarse_scan_value)
+    
+    print("\nstep goal value" + str(step_goal))
+    
+    print ("\nSCANNING COMMENCING")
+    
+    #put scanning code here
+    ultrasonic_scan()
+    
+
+
+
+#begin fine scan
+print("FINE SCAN BEGIN")
+print("best Step Goal: " , best_step_goal, angle)
+#time.sleep(20)
+#first move 1 additional coarse scan arc, and set end point
+#to backwards two coarse scan arcs.
+scan_interval_count=(0)
+#step_goal=angle #angle from coarse scan 
+step_move=int((best_step_goal+coarse_scan_value)-step_pos)
+print("best step goal vs step move", best_step_goal, step_move)
+#move back to best step move plus 1 coarse scan arc.
+print("last good angle:", angle, "step move:", step_move)
+print("best step goal& coarsescan val; ", best_step_goal, coarse_scan_value)
+#print ("\nstepper step move" + str(step_move))
+time.sleep(20)
+if (step_move <0):
+    set_ccw()
+    step =-1
+if (step_move>0):
+    set_cw()
+    step=1
+#step motor to position
+    
+#step_goal= (step_goal-coarse_sca)# go back 1 coarse arc,
+#print(" about to do fine scan sweep")
+fine_scan_stop= int(best_step_goal-(coarse_scan_value)) #pass through 2 coarse arc
+fine_scan_start=int(best_step_goal+coarse_scan_value)
+print("fine_scn_stop" + str (fine_scan_stop))
+print("stepping to start of fine step arc")
+print ("begin/middle/end", int(fine_scan_start), best_step_goal, int(fine_scan_stop))
+time.sleep(15)
+while step_pos != int(fine_scan_start):
+    
+    
+    step_pos+=step
+    print (step_pos)
+    #print("stepping to start of fine step arc")
+    time.sleep (0.001)
+    
+
+time.sleep(30)
+
+
+
+while (step_goal>fine_scan_stop):
+    step_goal= int((step_pos)-fine_scan_steps)
+    print ("\nstep goal: " +str(step_goal))  
+    print ("current step position " +str(step_pos))
+    #time.sleep(1)
+    
+    step_move=((step_goal)-step_pos) 
+    print ("\nstepper step move " + str(step_move))
+    print("\nstep goal value" + str(step_goal))
+
+    
+    
+    if (step_move <0):
+        set_ccw()
+        step =-1
+    if (step_move>0):
+        set_cw()
+        step=1
+    #step motor to position
+    while step_pos != int(step_goal):
+        stepper_run()
+        step_pos+=step
+        print (step_pos)
+        time.sleep(0.1)
+        print("step to fine step scan")
+        
+
+    print ("STEPPER IN POSITION "+ str(step_pos*360/steps_in_motor))
+    
+    print ("\nFine Mode SCANNING COMMENCING")
+    ultrasonic_scan()
+
+#STEP TO FINAL BEST ANGLE BEFORE MOVING
+print(" Step to final best angle")
+time.sleep(3)
+step_move=((best_step_goal)-step_pos)
+#NOTE BEST STEP GOAL NOT STEP GOAL
+print ("\nstepper step move " + str(step_move))
+print("\nstep goal value" + str(best_step_goal))
+
+    
+    
+if (step_move <0):
+    set_ccw()
+    step =-1
+if (step_move>0):
+    set_cw()
+    step=1
+    #step motor to position
+while step_pos != int(best_step_goal):
+#NOTE BEST STEP GOAL NOT STEP GOAL
+    stepper_run()
+    step_pos+=step
+    print (step_pos)
+    time.sleep(0.1)
+    print("step to final target")
+        
+
+print ("STEPPER IN POSITION "+ str(step_pos*360/steps_in_motor))
+    
+    
+    
+
+    
+    
+#BEGIN MOVEMENT
+
+    
+print("\nout of scanning loop:")
+time.sleep(45)
+#globalThermoNuclearWar= raw_input("\nWould you like to play a game? ")
+#if globalThermoNuclearWar=="y":
+
+    #angle = raw_input("what angle vector would you like to calculate? ")
+    #angle = int(angle)
+angleRadian = math.radians(angle) #may delete this line
+print("\nAngle:" + str (angle))
+print("Radian: " + str (angleRadian))
+
+vectorX= math.cos(math.radians(angle))
+vectorY= math.sin(math.radians(angle))
+
+    
+# code to zero out very low numbers on X&Y axis
+if vectorX < 0.001 and vectorX > -0.001:
+    vectorX=0.0
+if vectorY< 0.001 and vectorY> -0.001:
+    vectorY=0.0
+
+        
+wheel_1= -(vectorX)
+wheel_2= 0.5*(vectorX)-SqRt3o2*vectorY
+wheel_3= 0.5*(vectorX)+SqRt3o2*vectorY
+print("\nVector-X: "+ str (vectorX))
+print("Vector-Y: "+ str (vectorY))
+
+#these are the motor speed calc elements
+print ("\nWHEEL MOTOR SPEED CALC")
+print ("Wheel_1: " + str (wheel_1))
+print ("Wheel_2: " + str (wheel_2))
+print ("Wheel_3: " + str (wheel_3))
+
+#step_goal= int(angle/1.8)# destination of stepper ad no gears 200:1 step
+step_goal= int((angle/1.8)*5.18)#1.8 is 360/200steps * gearbox 5.18:1
+print ("step goal " +str(step_goal)) # ideally 0-200 values or 1036 values
+print ("current step position " +str(step_pos))
+
+
+
+    
+    
+# Motor Clockwise/countrer clockwise based on wheel value
+if ((wheel_1)>0):
+    (motorOne.run(Adafruit_MotorHAT.FORWARD))
+    print ("\nWheel_1 FORWARD")
+elif((wheel_1)<0):
+    (motorOne.run(Adafruit_MotorHAT.BACKWARD))
+    print ("\nWheel_1 BACKWARD")
+elif((wheel_1)==0):
+    (motorOne.run(Adafruit_MotorHAT.RELEASE))
+    print ("\nWheel_1 RELEASE")
+     
+if((wheel_2)>0):
+    (motorTwo.run(Adafruit_MotorHAT.FORWARD))
+    print ("Wheel_2 FORWARD")
+elif ((wheel_2)<0):
+    (motorTwo.run(Adafruit_MotorHAT.BACKWARD))
+    print ("Wheel_2 BACKWARD")
+elif ((wheel_2)==0):
+    (motorTwo.run(Adafruit_MotorHAT.RELEASE))
+    print ("Wheel_2 RELEASE")
+ 
+if ((wheel_3)>0):
+    (motorThree.run(Adafruit_MotorHAT.FORWARD))
+    print ("Motor_3 FORWARD")
+elif ((wheel_3)<0):
+    (motorThree.run(Adafruit_MotorHAT.BACKWARD))
+    print ("Motor_3 BACKWARD")
+elif ((wheel_3)==0):
+    (motorThree.run(Adafruit_MotorHAT.RELEASE))
+    print("Motor_3 RELEASE")
+#Accelerate!
+print ("ACCELRATE!")
+for i in range(speed):
+    ii=float(i)
+    
+    motorOne.setSpeed (int(round(abs(wheel_1)*255*(ii/speed))))
+    print ("Wheel1 Speed: "+ str(int(round(abs(wheel_1)*255*(ii/speed)))))
+    motorTwo.setSpeed (int(round(abs(wheel_2)*255*(ii/speed))))
+    print ("Wheel2 Speed: "+ str(int(round(abs(wheel_2)*255*(ii/speed)))))
+    motorThree.setSpeed (int(round(abs(wheel_3)*255*(ii/speed))))
+    print ("Wheel3 Speed: " +str(int(round(abs(wheel_3)*255*(ii/speed)))))
+    time.sleep(.01)
+    print (str(i))
+    print (str (ii/speed))
+    time.sleep (0.001)
+
+
+#FULL SPEED
+#print ("FULL SPEED")
+#time.sleep(1.5)
+
+#Decelerate!
+print ("DECELERATE!")
+for i in reversed(range(speed)):
+
+    ii=float(i) 
+    motorOne.setSpeed (int(round(abs(wheel_1)*255*(ii/speed))))
+    print ("Wheel1 Speed: "+ str(int(round(abs(wheel_1)*255*(ii/speed)))))
+    motorTwo.setSpeed (int(round(abs(wheel_2)*255*(ii/speed))))
+    print ("Wheel2 Speed: "+ str(int(round(abs(wheel_2)*255*(ii/speed)))))
+    motorThree.setSpeed (int(round(abs(wheel_3)*255*(ii/speed))))
+    print ("Wheel3 Speed: " +str(int(round(abs(wheel_3)*255*(ii/speed)))))
+    time.sleep(.01)
+    print (str(i))
+    print (str (ii/speed))
+    time.sleep(0.01)
+    
+print("angle of travel", angle)
+print("Release")
+
+motorOne.run(Adafruit_MotorHAT.RELEASE)
+motorTwo.run(Adafruit_MotorHAT.RELEASE)
+motorThree.run(Adafruit_MotorHAT.RELEASE)
+
+time.sleep(1.0)
 #!/usr/bin/python2
 #chassisMKII
 #chassisTest3- stepper pionts sensor pckage to desired travel  body moves in desired direction with accel/decel
